@@ -1,0 +1,648 @@
+/* ========= */
+/* Version 5 */
+/* ========= */
+#define p_blockSize 256
+
+/* multi-index array definitions */
+typedef const double const_jacDiag @dim(NVAR,NVAR,nelem);
+typedef const double const_jacOffD @dim(NVAR,NVAR,nintfaces);
+typedef const double const_ndoftot @dim(NVAR,nelem);
+typedef       double      _ndoftot @dim(NVAR,nelem);
+typedef const double const_matrix  @dim(NVAR,NVAR);
+typedef const double const_vector  @dim(NVAR);
+typedef       double      _matrix  @dim(NVAR,NVAR);
+typedef       double      _vector  @dim(NVAR);
+
+#define singleLoop \
+    for(int i = 0; i < NVAR; ++i; @inner)
+
+#define doubleLoop \
+    for(int j = 0; j < NVAR; ++j; @inner) \
+        for(int i = 0; i < NVAR; ++i; @inner)
+
+/* =============== */
+/* utility methods */
+/* =============== */
+/* solve Ax = b, A is LU-factored */
+inline void solveLU(@restrict const_matrix *A,
+                    @restrict const double *b,
+                    @restrict       double *x){
+    double y[NVAR];
+
+    /* forward substitution */
+    for(int i = 0; i < NVAR; ++i;){
+        double tot = 0.0;
+        for(int j = 0; j < i; ++j){
+            tot += A(i,j)*y[j];
+        }
+        y[i] = b[i]-tot;
+    }
+
+    /* back substitute to find x */
+    for(int i = NVAR-1; i >= 0; --i){
+        double tot = 0.0;
+        for(int j = i+1; j < NVAR; ++j){
+            tot += A(i,j)*x[j];
+        }
+        x[i] = (y[i]-tot)/A(i,i);
+    }
+}
+
+/* y = Ax, A = LU */
+inline void dgemvLU(@restrict const_matrix *LU,
+                    @restrict const double *x,
+                    @restrict       double *b){
+    double y[NVAR];
+
+    /* U operating on x */
+    for(int i = 0; i < NVAR; ++i){
+        double tot = 0.0;
+        for(int j = i; j < NVAR; ++j){
+            tot += LU(i,j)*x[j];
+        }
+        y[i] = tot;
+    }
+
+    /* L operating on y */
+    for(int i = 0; i < NVAR; ++i){
+        b[i] = y[i];
+        for(int j = 0; j < i; ++j){
+          b[i] += LU(i,j)*y[j];
+        }
+    }
+}
+
+@kernel void copyAtoB(const int nelem,
+            @restrict const double *A,
+            @restrict       double *B){
+
+    /* copy vector */
+    for(int n = 0; n < nelem*NVAR; ++n; @tile(p_blockSize,@outer,@inner)){
+        B[n] = A[n];
+    }
+}
+
+@kernel void copyAtoBjac(const int nelem,
+            @restrict const double *A,
+            @restrict       double *B){
+
+    /* copy vector */
+    for(int n = 0; n < nelem*NVAR*NVAR; ++n; @tile(p_blockSize,@outer,@inner)){
+        B[n] = A[n];
+    }
+}
+
+@kernel void addAtoB(const int nelem,
+           @restrict const double *A,
+           @restrict       double *B){
+
+    /* add vector in place */
+    for(int n = 0; n < nelem*NVAR; ++n; @tile(p_blockSize,@outer,@inner)){
+        B[n] += A[n];
+    }
+}
+
+/* kernels */
+@kernel void linesmoothLU_solveDU(const int nelem,
+                                  const int nintfaces,
+                                  const int eftot,
+                                  const int nlines,
+                                  const int nlinemult,
+                                  const int nlinedivider,
+                                  const int linelemtot,
+                        @restrict const int *fc,
+                        @restrict const int *linesize,
+                        @restrict const int *linepoint,
+                        @restrict const int *lines,
+                        @restrict const int *lineface,
+                        @restrict const_jacDiag *Dia,
+                        @restrict const_jacOffD *Of1,
+                        @restrict const_jacOffD *Of2,
+                        @restrict      _ndoftot *dU,
+                        @restrict const_ndoftot *R){
+
+    /* ========================================= */
+    /* line loop: parallelize over thread-blocks */
+    /* ========================================= */
+    for(int lm = 0; lm < nlinemult; ++lm; @outer){
+        for(int l = 0; l < nlines; ++l; @outer){
+
+            @shared double x[NVAR];
+            @shared double S[NVAR];
+            @shared double s_dU_e[NVAR];
+            @shared double s_dU_elast[NVAR];
+            @shared _matrix s_AT[NVAR*NVAR];
+            @shared _matrix s_CT[NVAR*NVAR];
+            @shared _matrix s_Dia[NVAR*NVAR];
+            for(int t = 0; t < 1; ++t; @inner){
+
+                /* Perform Forward and Backward Substitution of Thomas Algorithm */
+                // first element
+                const int nelem_line = linesize[l];
+                const int nelem_batch = nelem_line/nlinedivider;
+                const int offset = 0;//nelem_batch*lm;
+
+                int m = linepoint[l] + offset;
+                int e = lines[m];
+
+                /* ================= */
+                /* block 1: solve dU */
+                /* ================= */
+                singleLoop{
+                    // set right hand side: -r
+                    S[i] = -R(i,e);
+
+                    // fetch Dia(e) to shared
+                    for(int j = 0; j < NVAR; ++j){
+                        s_Dia(i,j) = Dia(i,j,e);
+                    }
+                }
+
+                // solve dU(e) = [D]^(-1)*S
+                solveLU(s_Dia,S,s_dU_e);
+                singleLoop{dU(i,e) = s_dU_e[i];}
+
+                /* ========================== */
+                /* remaining blocks: solve dU */
+                /* ========================== */
+                // forward solve
+                for(int k = 1; k < nelem_batch; ++k){
+                    m = linepoint[l] + k + offset;
+                    e = lines[m];
+
+                    const int f = lineface[m];
+                    const int e1 = fc[2*f+0];
+                    const int e2 = fc[2*f+1];
+
+                    m = linepoint[l] + k-1 + offset;
+                    const int elast = lines[m];
+
+                    const_jacOffD *A = (e==e1) ? Of2:Of1;
+                    singleLoop{
+                        // fetch transpose(A) to shared
+                        for(int j = 0; j < NVAR; ++j){
+                            s_AT(j,i) = A(i,j,f);
+                        }
+
+                        // fetch Dia(e) to shared
+                        for(int j = 0; j < NVAR; ++j){
+                            s_Dia(i,j) = Dia(i,j,e);
+                        }
+
+                        // fetch dU(elast) to shared
+                        s_dU_elast[i] = dU(i,elast);
+                    }
+
+                    // dgemv: x = A(:,:,f)*dU(:,elast)
+                    singleLoop{
+                        double tot = 0.0;
+                        for(int j = 0; j < NVAR; ++j){
+                            tot += s_AT(j,i)*s_dU_elast[j];
+                        }
+                        x[i] = tot;
+                    }
+
+                    // form total right hand side
+                    singleLoop{S[i] = -R(i,e) - x[i];}
+
+                    // dU(e) = [D]^(-1)*S
+                    solveLU(s_Dia,S,s_dU_e);
+                    singleLoop{dU(i,e) = s_dU_e[i];}
+                }
+
+                // back solve
+                for(int k = nelem_batch-2; k >= 0; --k){
+                    m = linepoint[l] + k + offset;
+                    e = lines[m];
+
+                    const int f = lineface[m+1];
+                    const int e1 = fc[2*f+0];
+                    const int e2 = fc[2*f+1];
+
+                    m = linepoint[l] + k+1 + offset;
+                    const int elast = lines[m];
+
+                    const_jacOffD *C = (e==e1) ? Of2:Of1;
+                    singleLoop{
+                        // fetch transpose(C) to shared
+                        for(int j = 0; j < NVAR; ++j){
+                            s_CT(j,i) = C(i,j,f);
+                        }
+
+                        // fetch Dia(e) to shared
+                        for(int j = 0; j < NVAR; ++j){
+                            s_Dia(i,j) = Dia(i,j,e);
+                        }
+
+                        // fetch dU(elast) to shared
+                        s_dU_elast[i] = dU(i,elast);
+                    }
+
+                    // dgemv: x = C(:,:,f)*dU(:,elast)
+                    singleLoop{
+                        double tot = 0.0;
+                        for(int j = 0; j < NVAR; ++j){
+                            tot += s_CT(j,i)*s_dU_elast[j];
+                        }
+                        x[i] = tot;
+                    }
+
+                    // dU(e) = dU(e) - [D]^(-1)*x
+                    solveLU(s_Dia,x,S);
+                    singleLoop{dU(i,e) -= S[i];}
+                }
+            }
+        }
+    }
+}
+
+@kernel void linesolver_lineResLU(const int nelem,
+                                  const int nintfaces,
+                                  const int eftot,
+                                  const int nlines,
+                                  const int linelemtot,
+                        @restrict const int *epoint,
+                        @restrict const int *ef,
+                        @restrict const int *fc,
+                        @restrict const int *linesize,
+                        @restrict const int *linepoint,
+                        @restrict const int *lines,
+                        @restrict const int *lineface,
+                        @restrict const_jacDiag *DiaLU,
+                        @restrict const_jacOffD *Of1,
+                        @restrict const_jacOffD *Of2,
+                        @restrict const_ndoftot *U,
+                        @restrict      _ndoftot *R){
+
+    /* ======================================== */
+    /* Calculate Linear Residual                */
+    /* See Lockwood's thesis: p.51, eqn. (3.37) */
+    /* ---------------------------------------- */
+    /*  Lin Res =  b - [A]x                     */
+    /*          = -R - ([D]*U + [O]*U)          */
+    /* ======================================== */
+
+    /* ========================================= */
+    /* line loop: parallelize over thread-blocks */
+    /* ========================================= */
+    for(int l = 0; l < nlines; ++l; @outer){
+
+        @shared double x[NVAR];
+        @shared double S[NVAR];
+        @shared double s_U[NVAR];
+        @shared double s_UN[NVAR];
+        @shared double s_R[NVAR];
+        @shared _matrix s_AT[NVAR*NVAR];
+        @shared _matrix s_CT[NVAR*NVAR];
+        @shared _matrix s_Dia_elast[NVAR*NVAR];
+        @shared _matrix s_Dia_e[NVAR*NVAR];
+
+        /* Perform Forward and Backward Substitution of Thomas Algorithm */
+        // block 1
+        int m = linepoint[l];
+        int e = lines[m];
+        const int nelem_line = linesize[l];
+
+        doubleLoop{
+            // zero residual buffer
+            if(j==0) s_R[i] = 0.0;
+
+            // fetch U to shared
+            if(j==0) s_U[i] = U(i,e);
+
+            // fetch D(:,:,e) to shared
+            s_Dia_e(i,j) = DiaLU(i,j,e);
+
+            /* off-diagonal components */
+            for(int k2 = epoint[e]; k2 < epoint[e+1]; ++k2){
+                const int f = ef[k2];
+                if(f>=0){
+                    const int e1 = fc[2*f+0];
+                    const int e2 = fc[2*f+1];
+
+                    const_jacOffD *A = (e==e1) ? Of2:Of1;
+                    const int neighbor_id = (e==e1) ? e2:e1;
+
+                    // fetch transpose(A) to shared
+                    s_AT(j,i) = A(i,j,f);
+
+                    // fetch U(neighbor_id) to shared
+                    if(j==0) s_UN[i] = U(i,neighbor_id);
+                    @barrier();
+
+                    // dgemv(A,U,s_R)
+                    if(j==0){
+                        double tot = 0.0;
+                        for(int jj = 0; jj < NVAR; ++jj){
+                            tot += s_AT(jj,i)*s_UN[jj];
+                        }
+                        s_R[i] += tot;
+                    }
+                }
+            }
+
+            /* diagonal component */
+            if(i==0 && j==0) dgemvLU(s_Dia_e,s_U,x);
+            @barrier();
+
+            // accumulate into global residual vector
+            R(i,e) += x[i] + s_R[i];
+
+            // remaining blocks
+            for(int k = 1; k < nelem_line; ++k){
+                m = linepoint[l] + k;
+                e = lines[m];
+
+                const int f = lineface[m];
+                int e1 = fc[2*f+0];
+                int e2 = fc[2*f+1];
+
+                m = linepoint[l] + k-1;
+                const int elast = lines[m];
+
+                /* ======================================================================*
+                 * 1.) Diagonal Contribution: Factored D from Block Thomas Factorization *
+                 *       >>>Nicks Thesis, p.102 Alg.1, line 4 rearranged for [B]_j       *
+                 *                  [B]_j = [B']_j + [A]_j*([B']_{j-1}^{-1} * [C]_{j-1}) *
+                 *                         <part A>   +        <part B>                  *
+                 *                                                                       *
+                 * ----> [Jacobian Diagonal Block] = [B]_j                               *
+                 * ----> [B]_J * U part of right hand side                               *
+                 * ===================================================================== */
+
+                // zero residual buffer
+                if(j==0) s_R[i] = 0.0;
+
+                // fetch U to shared
+                if(j==0) s_U[i] = U(i,e);
+
+                /* ---------- */
+                /* Fetch Data */
+                /* ---------- */
+                const_jacOffD *A = (e==e1) ? Of2:Of1;
+                const_jacOffD *C = (e==e1) ? Of1:Of2;
+
+                // fetch transpose(C) to shared
+                s_CT(j,i) = C(i,j,f);
+
+                // fetch transpose(A) to shared
+                s_AT(j,i) = A(i,j,f);
+
+                // fetch Dia(elast) to shared
+                s_Dia_elast(i,j) = DiaLU(i,j,elast);
+
+                // fetch Dia(e) to shared
+                s_Dia_e(i,j) = DiaLU(i,j,e);
+                @barrier();
+
+                /* ----- */
+                /* Solve */
+                /* ----- */
+                // x = [C]_{j-1} * U(e)
+                if(j==0){
+                    double tot = 0.0;
+                    for(int jj = 0; jj < NVAR; ++jj){
+                        tot += s_CT(jj,i)*s_U[jj];
+                    }
+                    x[i] = tot;
+                }
+                @barrier();
+
+                // S = [B']_{j-1}^{-1} * x
+                if(i==0 && j==0) solveLU(s_Dia_elast,x,S);
+                @barrier();
+
+                // x = [A]_j * S      = <part B>
+                if(j==0){
+                    double tot = 0.0;
+                    for(int jj = 0; jj < NVAR; ++jj){
+                        tot += s_AT(jj,i)*S[jj];
+                    }
+                    x[i] = tot;
+                }
+
+                // S = [B']_j * U(e)) = <part A>
+                if(i==0 && j==0) dgemvLU(s_Dia_e,s_U,S);
+                @barrier();
+
+                // accumulate result: <part A> + <part B>
+                if(j==0) s_R[i] += x[i] + S[i];
+                @barrier();
+                /* ========================================================== */
+
+                /* ========================================================== */
+                /* 2.) Off Diagonal Contributions (all off-diagonal elements) */
+                /* ========================================================== */
+                for(int k2 = epoint[e]; k2 < epoint[e+1]; ++k2){
+                    const int f = ef[k2];
+                    if(f>=0){
+                        e1 = fc[2*f+0];
+                        e2 = fc[2*f+1];
+
+                        const_jacOffD *A = (e==e1) ? Of2:Of1;
+                        const int neighbor_id = (e==e1) ? e2:e1;
+
+                        // fetch transpose(A) to shared
+                        s_AT(j,i) = A(i,j,f);
+
+                        // fetch U to shared
+                        if(j==0) s_U[i] = U(i,neighbor_id);
+                        @barrier();
+
+                        // dgemv(A,U,R)
+                        if(j==0){
+                            double tot = 0.0;
+                            for(int jj = 0; jj < NVAR; ++jj){
+                                tot += s_AT(jj,i)*s_U[jj];
+                            }
+                            s_R[i] += tot;
+                        }
+                    }
+                }
+                @barrier();
+
+                // accumulate into global residual vector
+                R(i,e) += s_R[i];
+            }
+        }
+    }
+}
+
+@kernel void linesolver_lineRes(const int nelem,
+                                const int nintfaces,
+                                const int eftot,
+                                const int nlines,
+                                const int nlinemult,
+                                const int nlinedivider,
+                                const int linelemtot,
+                      @restrict const int *epoint,
+                      @restrict const int *ef,
+                      @restrict const int *fc,
+                      @restrict const int *linesize,
+                      @restrict const int *linepoint,
+                      @restrict const int *lines,
+                      @restrict const int *lineface,
+                      @restrict const_jacDiag *Dia,
+                      @restrict const_jacOffD *Of1,
+                      @restrict const_jacOffD *Of2,
+                      @restrict const_ndoftot *U,
+                      @restrict      _ndoftot *R){
+
+    /* ======================================== */
+    /* Calculate Linear Residual                */
+    /* See Lockwood's thesis: p.51, eqn. (3.37) */
+    /* ---------------------------------------- */
+    /*  Lin Res =  b - [A]x                     */
+    /*          = -R - ([D]*U + [O]*U)          */
+    /* ======================================== */
+
+    /* ========================================= */
+    /* line loop: parallelize over thread-blocks */
+    /* ========================================= */
+    for(int lm = 0; lm < nlinemult; ++lm; @outer){
+        for(int l = 0; l < nlines; ++l; @outer){
+
+            @shared double x[NVAR];
+            @shared double s_R[NVAR];
+            @shared double s_U[NVAR];
+            @shared double s_UN[NVAR];
+            @shared _matrix s_AT[NVAR*NVAR];
+            @shared _matrix s_Dia_e[NVAR*NVAR];
+            for(int t = 0; t < 1; ++t; @inner){
+
+                // block 1
+                const int nelem_line = linesize[l];
+                const int nelem_batch = nelem_line/nlinedivider;
+                const int offset = 0;//nelem_batch*lm;
+
+                int m0 = linepoint[l] + offset;
+                int e = lines[m0];
+
+                singleLoop{
+                    // fetch U to shared
+                    s_U[i] = U(i,e);
+
+                    // fetch transposed(D(e)) to shared
+                    for(int j = 0; j < NVAR; ++j){
+                        s_Dia_e(j,i) = Dia(i,j,e);
+                    }
+                }
+
+                // dgemv(D,U,x)
+                singleLoop{
+                    double tot = 0.0;
+                    for(int j = 0; j < NVAR; ++j){
+                        tot += s_Dia_e(j,i)*s_U[j];
+                    }
+                    s_R[i] = tot;
+                }
+
+                // off-diagonal components
+                for(int k2 = epoint[e]; k2 < epoint[e+1]; ++k2){
+                    const int f = ef[k2];
+                    if(f>=0){
+                        const int e1 = fc[2*f+0];
+                        const int e2 = fc[2*f+1];
+
+                        const_jacOffD *A = (e==e1) ? Of2:Of1;
+                        const int neighbor_id = (e==e1) ? e2:e1;
+
+                        singleLoop{
+                            // fetch transpose(A) to shared
+                            for(int j = 0; j < NVAR; ++j){
+                                s_AT(j,i) = A(i,j,f);
+                            }
+
+                            // fetch U(neighbor_id) to shared
+                            s_UN[i] = U(i,neighbor_id);
+                        }
+
+                        // dgemv(A,U,s_R)
+                        singleLoop{
+                            double tot = 0.0;
+                            for(int j = 0; j < NVAR; ++j){
+                                tot += s_AT(j,i)*s_UN[j];
+                            }
+                            s_R[i] += tot;
+                        }
+                    }
+                }
+                // accumulate into global residual vector
+                singleLoop{R(i,e) += s_R[i];}
+
+                // remaining blocks
+                for(int k = 1; k < nelem_batch; ++k){
+                    int m = m0 + k;
+                    int e = lines[m];
+
+                    /* =================================================================*
+                     * 1.) Diagonal Contribution: Diagonal is NOT Block Thomas Factored *
+                     * ----> [Jacobian Diagonal Block] = [D]_j                          *
+                     * ---->  [D]_J * U part of right hand side                         *
+                     * ================================================================ */
+                    // fetch data
+                    singleLoop{
+                        // zero residual buffer
+                        s_R[i] = 0.0;
+
+                        // fetch U to shared
+                        s_U[i] = U(i,e);
+
+                        // fetch transpose(Dia(e)) to shared
+                        for(int j = 0; j < NVAR; ++j){
+                            s_Dia_e(j,i) = Dia(i,j,e);
+                        }
+                    }
+
+                    // dgemv(D,U,x)
+                    singleLoop{
+                        double tot = 0.0;
+                        for(int j = 0; j < NVAR; ++j){
+                            tot += s_Dia_e(j,i)*s_U[j];
+                        }
+                        x[i] = tot;
+                    }
+                    // accumulate result
+                    singleLoop{s_R[i] += x[i];}
+                    /* ========================================================== */
+
+                    /* ========================================================== *
+                     * 2.) Off Diagonal Contributions (all off-diagonal elements) *
+                     * ========================================================== */
+                    for(int k2 = epoint[e]; k2 < epoint[e+1]; ++k2){
+                        const int f = ef[k2];
+                        if(f>=0){
+                            int e1 = fc[2*f+0];
+                            int e2 = fc[2*f+1];
+
+                            const_jacOffD *A = (e==e1) ? Of2:Of1;
+                            const int neighbor_id = (e==e1) ? e2:e1;
+
+                            // fetch transpose(A) to shared
+                            singleLoop{
+                                for(int j = 0; j < NVAR; ++j){
+                                    s_AT(j,i) = A(i,j,f);
+                                }
+                            }
+
+                            // fetch U to shared
+                            singleLoop{s_U[i] = U(i,neighbor_id);}
+
+                            // dgemv(A,U,R)
+                            singleLoop{
+                                double tot = 0.0;
+                                for(int j = 0; j < NVAR; ++j){
+                                    tot += s_AT(j,i)*s_U[j];
+                                }
+                                s_R[i] += tot;
+                            }
+                        }
+                    }
+
+                    // accumulate into global residual vector
+                    singleLoop{R(i,e) += s_R[i];}
+                }
+            }
+        }
+    }
+}

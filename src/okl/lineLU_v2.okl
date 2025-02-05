@@ -1,0 +1,182 @@
+/* ========= *
+ * Version 1 *
+ * ========= */
+
+/* multi-index array definitions */
+typedef const double const_jacDiag @dim(NVAR,NVAR,nelem);
+typedef       double       jacDiag @dim(NVAR,NVAR,nelem);
+typedef const double const_jacOffD @dim(NVAR,NVAR,nintfaces);
+typedef const double const_matrix  @dim(NVAR,NVAR);
+typedef const double const_vector  @dim(NVAR);
+typedef       double      _matrix  @dim(NVAR,NVAR);
+typedef       double      _vector  @dim(NVAR);
+
+/* =============== *
+ * utility methods *
+ * =============== */
+inline void LU(_matrix *A){
+    for(int j = 0; j < NVAR; ++j){
+        double pivot = 1.0/A(j,j);
+        for(int i = j+1; i < NVAR; ++i){
+            A(i,j) = A(i,j)*pivot;
+            for(int k = j+1; k < NVAR; ++k){
+                A(i,k) -= A(i,j)*A(j,k);
+            }
+        }
+    }
+}
+
+/* solve Ax = b, A is LU-factored */
+inline void solveLU(@restrict const_matrix *A,
+                    @restrict const double *b,
+                    @restrict       double *x){
+    double y[NVAR];
+
+    /* forward substitution */
+    for(int i = 0; i < NVAR; ++i;){
+        double tot = 0.0;
+        for(int j = 0; j < i; ++j){
+            tot += A(i,j)*y[j];
+        }
+        y[i] = b[i]-tot;
+    }
+
+    /* back substitute to find x */
+    for(int i = NVAR-1; i >= 0; --i){
+        double tot = 0.0;
+        for(int j = i+1; j < NVAR; ++j){
+            tot += A(i,j)*x[j];
+        }
+        x[i] = (y[i]-tot)/A(i,i);
+    }
+}
+
+#define singleLoop \
+    for(int i = 0; i < NVAR; ++i; @inner)
+
+/* kernels */
+@kernel void lineLU(const int nelem,
+                    const int nintfaces,
+                    const int nlines,
+          @restrict const int *fc,
+          @restrict const int *linesize,
+          @restrict const int *linepoint,
+          @restrict const int *lines,
+          @restrict const int *lineface,
+          @restrict       jacDiag *Dia,
+          @restrict const_jacOffD *Of1,
+          @restrict const_jacOffD *Of2,
+          @restrict       jacDiag *DinvC){
+
+    /* ========================================= */
+    /* line loop: parallelize over thread-blocks */
+    /* ========================================= */
+    for(int l = 0; l < nlines; ++l; @outer){
+        const int nelem_line = linesize[l];
+
+        @shared _matrix Gamma[NVAR*NVAR];
+        @shared _matrix Alpha[NVAR*NVAR];
+        @shared _matrix s_C[NVAR*NVAR];
+        @shared _matrix s_AT[NVAR*NVAR];
+        @shared _matrix s_Dia_e[NVAR*NVAR];
+        @shared _matrix s_Dia_elast[NVAR*NVAR];
+        @shared _matrix s_DinvC[NVAR*NVAR];
+        for(int t = 0; t < 1; ++t; @inner){
+
+            // block 1
+            int m0 = linepoint[l];
+            int e = lines[m0];
+
+            // LU Diagonal Block 1
+            LU(&Dia(0,0,e));
+
+            // remaining blocks
+            for(int k = 1; k < nelem_line; ++k){
+                int m = m0 + k;
+                int e = lines[m];
+
+                const int f = lineface[m];
+                int e1 = fc[2*f];
+
+                m = m0 + k-1;
+                const int elast = lines[m];
+
+                /* ======================================================================*
+                 * 1.) Diagonal Contribution: Factored D from Block Thomas Factorization *
+                 *       >>>Nicks Thesis, p.102 Alg.1, line 4 for [D']_j                 *
+                 *                  [D']_j = [D]_j - [A]_j*([D']_{j-1}^{-1} * [C]_{j-1}) *
+                 *                          <part A>   +       <part B>                  *
+                 *                                                                       *
+                 * ----> [Diagonal Jacobian Block] = [D]_j                               *
+                 * ===================================================================== */
+
+                /* ---------- */
+                /* Fetch Data */
+                /* ---------- */
+                const_jacOffD *A = (e==e1) ? Of2:Of1;
+                const_jacOffD *C = (e==e1) ? Of1:Of2;
+
+                singleLoop{
+                    // fetch C to shared
+                    for(int j = 0; j < NVAR; ++j){
+                        s_C(i,j) = C(i,j,f);
+                    }
+
+                    // fetch transpose(A) to shared
+                    for(int j = 0; j < NVAR; ++j){
+                        s_AT(j,i) = A(i,j,f);
+                    }
+
+                    // fetch Dia(elast) to shared
+                    for(int j = 0; j < NVAR; ++j){
+                        s_Dia_elast(i,j) = Dia(i,j,elast);
+                    }
+
+                    // fetch Dia(e) to shared
+                    for(int j = 0; j < NVAR; ++j){
+                        s_Dia_e(i,j) = Dia(i,j,e);
+                    }
+                }
+
+                // compute Gamma: D[i-1]^(-1) * C[i-1]
+                singleLoop{
+                    solveLU(s_Dia_elast,&s_C(0,i),&Gamma(0,i));
+                }
+
+                // compute Alpha: A[i] * Gamma
+                singleLoop{
+                    for(int k = 0; k < NVAR; ++k){
+                        double tot = 0.0;
+                        for(int j = 0; j < NVAR; ++j){
+                            tot += s_AT(j,i)*Gamma(j,k);
+                        }
+                        Alpha(i,k) = tot;
+                    }
+                }
+
+                // assemble Thomas denominator
+                singleLoop{
+                    for(int j = 0; j < NVAR; ++j){
+                        s_Dia_e(i,j) -= Alpha(i,j);
+                    }
+                }
+
+                // LU factor denominator
+                LU(s_Dia_e);
+                @barrier();
+
+                // save back to global memory
+                singleLoop{
+                    for(int j = 0; j < NVAR; ++j){
+                        Dia(i,j,e) = s_Dia_e(i,j);
+                    }
+
+                    // store D^(-1)*C=Gamma to global
+                    for(int j = 0; j < NVAR; ++j){
+                        DinvC(i,j,elast) = Gamma(i,j);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,296 @@
+/* ========= */
+/* Version 1 */
+/* ========= */
+
+/* multi-index array definitions */
+typedef const double const_jacDiag @dim(NVAR,NVAR,nelem);
+typedef const double const_jacOffD @dim(NVAR,NVAR,nintfaces);
+typedef const double const_ndoftot @dim(NVAR,nelem);
+typedef       double      _ndoftot @dim(NVAR,nelem);
+typedef const double const_matrix  @dim(NVAR,NVAR);
+typedef const double const_vector  @dim(NVAR);
+typedef       double      _matrix  @dim(NVAR,NVAR);
+typedef       double      _vector  @dim(NVAR);
+
+/* =============== */
+/* utility methods */
+/* =============== */
+/* solve Ax = b, A is LU-factored */
+inline void solveLU(const_matrix *A,
+                    const double *b,
+                          double *x){
+
+    double y[NVAR];
+    double tot;
+    int i,j;
+
+    for(int n = 0; n < NVAR; ++n) y[n] = 0.0;
+
+    /* forward substitution */
+    for(i = 0; i < NVAR; ++i){
+        tot = 0.0;
+        for(j = 0; j < i; ++j){
+            tot += A(i,j)*y[j];
+        }
+        y[i] = b[i]-tot;
+    }
+
+    /* back substitute to find x */
+    for(i = NVAR-1; i >= 0; --i){
+         tot = 0.0;
+         for(j = i+1; j < NVAR; ++j){
+            tot += A(i,j)*x[j];
+         }
+         x[i] = (y[i]-tot)/A(i,i);
+    }
+}
+
+/* y = Ax */
+inline void dgemv(const_matrix *A,
+                  const double *x,
+                        double *y){
+    for(int i = 0; i < NVAR; ++i){
+        double tot = 0.0;
+        for(int j = 0; j < NVAR; ++j){
+            tot += A(i,j)*x[j];
+        }
+        y[i] = tot;
+    }
+}
+
+/* y = Ax, A = LU */
+inline void dgemvLU(const_matrix *LU,
+                    const double *x,
+                          double *b){
+    double y[NVAR];
+
+    /* U operating on x */
+    for(int i = 0; i < NVAR; ++i){
+        double tot = 0.0;
+        for(int j = i; j < NVAR; ++j){
+            tot += LU(i,j)*x[j];
+        }
+        y[i] = tot;
+    }
+
+    /* L operating on y */
+    for(int i = 0; i < NVAR; ++i){
+        b[i] = y[i];
+        for(int j = 0; j < i; ++j){
+          b[i] += LU(i,j)*y[j];
+        }
+    }
+}
+
+@kernel void copyAtoB(const int nelem,
+            @restrict const_ndoftot *A,
+            @restrict      _ndoftot *B){
+
+    /* copy spatial residual to rhs of system */
+    for(int e = 0; e < nelem; ++e; @outer){
+        for(int n = 0; n < NVAR; ++n; @inner){
+            B(n,e) = A(n,e);
+        }
+    }
+}
+
+@kernel void addAtoB(const int nelem,
+           @restrict const_ndoftot *A,
+           @restrict      _ndoftot *B){
+
+    /* copy spatial residual to rhs of system */
+    for(int e = 0; e < nelem; ++e; @outer){
+        for(int n = 0; n < NVAR; ++n; @inner){
+            B(n,e) += A(n,e);
+        }
+    }
+}
+
+/* kernels */
+@kernel void linesmoothLU_solveDU(const int nelem,
+                                  const int nintfaces,
+                                  const int eftot,
+                                  const int nlines,
+                                  const int linelemtot,
+                        @restrict const int *epoint,
+                        @restrict const int *ef,
+                        @restrict const int *fc,
+                        @restrict const int *linesize,
+                        @restrict const int *linepoint,
+                        @restrict const int *lines,
+                        @restrict const int *lineface,
+                        @restrict const_jacDiag *Dia,
+                        @restrict const_jacOffD *Of1,
+                        @restrict const_jacOffD *Of2,
+                        @restrict      _ndoftot *dU,
+                        @restrict const_ndoftot *B,
+                        @restrict      _ndoftot *U,
+                        @restrict      _ndoftot *R){
+
+    /* ========================================= */
+    /* line loop: parallelize over thread-blocks */
+    /* ========================================= */
+    for(int l = 0; l < nlines; ++l; @tile(1,@outer,@inner)){
+
+        // Perform Forward and Backward Substitution of Thomas Algorithm
+        int m = linepoint[l];
+        int e = lines[m];
+        int nelem_line = linesize[l];
+
+        double x[NVAR];
+        double r_S[NVAR];
+
+        /* block 1: solve dU */
+        for(int n = 0; n < NVAR; ++n) r_S[n] = -R(n,e);
+        solveLU(&Dia(0,0,e),r_S,&dU(0,e));
+
+        /* forward solve */
+        for(int k = 1; k < nelem_line; ++k){
+            m = linepoint[l] + k;
+            e = lines[m];
+
+            int f = lineface[m];
+            int e1 = fc[2*f+0];
+            int e2 = fc[2*f+1];
+
+            m = linepoint[l] + k-1;
+            int elast = lines[m];
+
+            const_jacOffD *A = (e==e1) ? Of2:Of1;
+            dgemv(&A(0,0,f),&dU(0,elast),x);
+
+            for(int n = 0; n < NVAR; ++n) r_S[n] = -R(n,e) - x[n];
+            solveLU(&Dia(0,0,e),r_S,&dU(0,e));
+        }
+
+        /* back solve */
+        for (int k = nelem_line-2; k >= 0; --k){
+            m = linepoint[l] + k;
+            e = lines[m];
+
+            int f = lineface[m+1];
+            int e1 = fc[2*f+0];
+            int e2 = fc[2*f+1];
+
+            m = linepoint[l] + k+1;
+            int elast = lines[m];
+
+            const_jacOffD *C = (e==e1) ? Of2:Of1;
+            dgemv(&C(0,0,f),&dU(0,elast),x);
+
+            solveLU(&Dia(0,0,e),x,r_S);
+            for(int n = 0; n < NVAR; ++n) dU(n,e) -= r_S[n];
+        }
+    }
+}
+
+@kernel void linesolver_lineRes(const int nelem,
+                                const int nintfaces,
+                                const int eftot,
+                                const int nlines,
+                                const int linelemtot,
+                      @restrict const int *epoint,
+                      @restrict const int *ef,
+                      @restrict const int *fc,
+                      @restrict const int *linesize,
+                      @restrict const int *linepoint,
+                      @restrict const int *lines,
+                      @restrict const int *lineface,
+                      @restrict const_jacDiag *Dia,
+                      @restrict const_jacOffD *Of1,
+                      @restrict const_jacOffD *Of2,
+                      @restrict      _ndoftot *dU,
+                      @restrict const_ndoftot *B,
+                      @restrict      _ndoftot *U,
+                      @restrict      _ndoftot *R){
+
+    /* ======================================== */
+    /* Calculate Linear Residual                */
+    /* See Lockwood's thesis: p.51, eqn. (3.37) */
+    /* ---------------------------------------- */
+    /*  Lin Res =  b - [A]x                     */
+    /*          = -R - ([D]*U + [O]*U)          */
+    /* ======================================== */
+
+    /* ========================================= */
+    /* line loop: parallelize over thread-blocks */
+    /* ========================================= */
+    for(int l = 0; l < nlines; ++l; @tile(1,@outer,@inner)){
+        double x[NVAR];
+        double S[NVAR];
+
+        /* ============================================================= */
+        /* Perform Forward and Backward Substitution of Thomas Algorithm */
+        /* ============================================================= */
+        /* first element */
+        int m = linepoint[l];
+        int e = lines[m];
+        int nelem_line = linesize[l];
+
+        for(int k2 = epoint[e]; k2 < epoint[e+1]; ++k2){
+            int f = ef[k2];
+            if(f>=0){
+                int e1 = fc[2*f+0];
+                int e2 = fc[2*f+1];
+
+                const_jacOffD *A = (e==e1) ? Of2:Of1;
+                int neighbor_id = (e==e1) ? e2:e1;
+
+                for(int j = 0; j < NVAR; ++j){
+                    for(int i = 0; i < NVAR; ++i){
+                        R(i,e) += A(i,j,f)*U(j,neighbor_id);
+                    }
+                }
+            }
+        }
+        dgemvLU(&Dia(0,0,e),&U(0,e),x);
+        for(int n = 0; n < NVAR; ++n) R(n,e) += x[n];
+
+        /* remaining elements */
+        for(int k = 1; k < nelem_line; ++k){
+            m = linepoint[l] + k;
+            e = lines[m];
+
+            int f = lineface[m];
+            int e1 = fc[2*f+0];
+            int e2 = fc[2*f+1];
+
+            m = linepoint[l] + k-1;
+            int elast = lines[m];
+
+            /* 1.) Diagonal Contribution: Factored D from Block Thomas Factorization
+             *       >>>Nicks Thesis, p.102 Alg.1, line 4 rearranged for [B]_j
+             *                  [B]_j = [B']_j + [A]_j*([B']_{j-1}^{-1} * [C]_{j-1})
+             *                         <part A>   +        <part B>
+             *
+             * ----> [Jacobian Diagonal Block] = [B]_j ---> [B]_J * U part of right hand side
+             */
+            const_jacOffD *A = (e==e1) ? Of2:Of1;
+            const_jacOffD *C = (e==e1) ? Of1:Of2;
+
+            dgemv(&C(0,0,f),&U(0,e),x);       // x = [C]_{j-1} * U(e)
+            solveLU(&Dia(0,0,elast),x,S);     // S = [B']_{j-1}^{-1} * x
+            dgemv(&A(0,0,f),S,x);             // x = [A]_j * S      = <part B>
+            dgemvLU(&Dia(0,0,e),&U(0,e),S);   // S = [B']_j * U(e)) = <part A>
+            for(int n = 0; n < NVAR; ++n) R(n,e) += x[n] + S[n];
+
+            /* 2.) Off Diagonal Contributions (all off-diagonal elements) */
+            for(int k2 = epoint[e]; k2 < epoint[e+1]; ++k2){
+                int f = ef[k2];
+                if(f>=0){
+                    e1 = fc[2*f+0];
+                    e2 = fc[2*f+1];
+
+                    const_jacOffD *A = (e==e1) ? Of2:Of1;
+                    int neighbor_id = (e==e1) ? e2:e1;
+
+                    for(int j = 0; j < NVAR; ++j){
+                        for(int i = 0; i < NVAR; ++i){
+                            R(i,e) += A(i,j,f)*U(j,neighbor_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

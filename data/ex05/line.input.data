@@ -1,0 +1,14 @@
+        nvar       nelem   nintfaces       eftot      nlines  nlineelem
+           9        3840        7556       15360          60        3840
+ epoint(nelem+1)
+ ef(eftot)
+ fc(2,nintfaces)
+ linsize(nlines)
+ linpoint(nlines+1)
+ lines(nlineelem)
+ linface(nlineelem)
+ jacDiag(nvar,nvar,nelem)
+ jacO1(nvar,nvar,nintfaces)
+ jacO2(nvar,nvar,nintfaces)
+ B(nvar,nelem)
+ Ui(nvar,nelem)
