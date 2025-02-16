@@ -31,14 +31,23 @@ Internally, the program reads data sets from the directories (e.g., `ex10`):
 Running `./setdata.sh ex05` sets these symbolic links as seen in the image above.  
 
 ## Example Data Sets
-Four data sets are available via Git LFS (**PENDING**). These data sets contain Jacobian matrix values generated from a 2D real-gas hypersonic flow solver using a 5-species, 2-temperature gas model for non-ionizing air. The number of variables of each mesh block is of size 9x9, thus for the program input, we say `block_size = 9`. The data sets (meshes) available for benchmarking are listed below. 
+Three data sets (ex05, ex06, ex10) are available via Git LFS. These data sets contain Jacobian matrix values generated from a 2D real-gas hypersonic flow solver using a 5-species, 2-temperature gas model for non-ionizing air. The number of variables of each mesh block is of size 9x9, thus for the program input, we say `block_size = 9`. The data sets (meshes) available for benchmarking are listed below. 
 
-| NAME | # MESH ELEM | # MESH LINES | Jacobian Data Size |
-| ---- | -----------:| ------------:|:------------------:|
-| ex05 |       3,840 |           60 |  13M               |
-| ex06 |     138,240 |          360 | 446M               |
-| ex10 |     384,000 |          600 | 1.3G               |
-| ex20 |   1,536,000 |        1,200 | 4.9G               |
+| NAME | # MESH ELEM | # MESH LINES | Jacobian Data Size |      ACCESS    |
+| ---- | -----------:| ------------:|:------------------:|:--------------:|
+| ex05 |       3,840 |           60 |  13M               | default        |
+| ex06 |     138,240 |          360 | 446M               | `git lfs pull` |
+| ex10 |     384,000 |          600 | 1.3G               | `git lfs pull` |
+| ex20 |   1,536,000 |        1,200 | 4.9G               | request only   |
+
+### Git Large File Storage (LFS) Setup
+To set up Git LFS to retrieve the `ex06` and `ex10` example data sets, follow these steps:
+1. Install Git LFS
+  - Linux: `sudo apt install git-lfs  # (For Debian/Ubuntu)`
+  - MAC: `brew install git-lfs`
+  - Windows: Download and install from [git-lfs.github.com](git-lfs.github.com)
+2. Retrieve the files
+  - `git lfs pull`
 
 ## Running `./triblock.exe <compute_mode> <device_id> <block_size>`  
 
@@ -49,7 +58,7 @@ Solving the matrix problem using:
 
 ![image](https://github.com/user-attachments/assets/83ec256c-77fb-47eb-ad41-e706a2896f80)
 
-## Credit/Citation
+## Acknowledgement
 Please cite [doi:10.2514/6.2025-0784](https://doi.org/10.2514/6.2025-0784)  
 ```console
 @inproceedings{kirby2025gpu,
