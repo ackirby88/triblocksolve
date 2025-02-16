@@ -37,7 +37,7 @@ Three data sets (ex05, ex06, ex10) are available via Git LFS. These data sets co
 | ---- | -----------:| ------------:|:------------------:|:--------------:|
 | ex05 |       3,840 |           60 |  13M               | default        |
 | ex06 |     138,240 |          360 | 446M               | `git lfs pull` |
-| ex10 |     384,000 |          600 | 1.3G               | `git lfs pull` |
+| ex10 |     384,000 |          600 | 1.3G               | request only   |
 | ex20 |   1,536,000 |        1,200 | 4.9G               | request only   |
 
 ### Git Large File Storage (LFS) Setup
