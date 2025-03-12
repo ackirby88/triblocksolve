@@ -6,7 +6,6 @@
 #   builds             #build directory
 #   src                #source codes
 
-
 # ======================= #
 # project directory paths
 # ======================= #
@@ -67,7 +66,7 @@ DPCPP="OFF"
 METAL="OFF"
 
 APP_HIP_ROOT=
-APP_CUDATookit_ROOT=
+APP_CUDAToolkit_ROOT=
 APP_OpenCL_ROOT=
 APP_SYCL_ROOT=
 
@@ -123,7 +122,7 @@ help() {
     echo "      --dpcpp   -dpcpp                enable DPC++ mode"
     echo "      --metal   -metal                enable Metal mode"
     echo " "
-    echo "      CUDATookit_ROOT=<arg>           set path to NVIDIA CUDA Toolkit"
+    echo "      CUDA_ROOT=<arg>                 set path to NVIDIA CUDA Toolkit"
     echo "      HIP_ROOT=<arg>                  set path to AMD HIP Toolkit"
     echo "      OpenCL_ROOT=<arg>               set path to OpenCL headers and library"
     echo "      SYCL_ROOT=<arg>                 set path to SYCL headers and library"
@@ -193,9 +192,9 @@ do
     FC=${var:9}
     echo -e "[OPTION] Fortran Compiler Flags: $yC$FC_FLAGS$eC"
 
-  elif [ "${var:0:10}" == "CUDA_ROOT_ROOT=" ]; then
-    APP_CUDATookit_ROOT=${var:10}
-    echo -e "[OPTION]     CUDA Toolkit Path: $yC$APP_CUDA__ROOT$eC"
+  elif [ "${var:0:10}" == "CUDA_ROOT=" ]; then
+    APP_CUDAToolkit_ROOT=${var:10}
+    echo -e "[OPTION]     CUDA Toolkit Path: $yC$APP_CUDAToolkit_ROOT$eC"
   elif [ "${var:0:9}" == "HIP_ROOT=" ]; then
     APP_HIP_ROOT=${var:9}
     echo -e "[OPTION]     HIP Toolkit Path: $yC$APP_HIP_ROOT$eC"
@@ -265,7 +264,6 @@ if [[ $BUILD_OCCA == 0 && $BUILD_APP == 0 ]]; then
   BUILD_APP=1
 fi
 
-
 # ----------------------------------------------------- #
 # After reading in cmd arg options, set remaining paths #
 # ----------------------------------------------------- #
@@ -327,7 +325,7 @@ if [ $BUILD_OCCA == 1 ]; then
   echo " "
   echo "      Device Modes:"
   echo "               HIP: ${HIP}         HIP_ROOT: ${APP_HIP_ROOT}"
-  echo "              CUDA: ${CUDA}       CUDA_ROOT: ${APP_CUDATookit_ROOT}"
+  echo "              CUDA: ${CUDA}       CUDA_ROOT: ${APP_CUDAToolkit_ROOT}"
   echo "            OpenMP: ${OPENMP}"
   echo "            OpenCL: ${OPENCL}     OpenCL_ROOT: ${APP_OpenCL_ROOT}"
   echo "             DPC++: ${DPCPP}       SYCL_ROOT: ${APP_SYCL_ROOT}"
@@ -340,17 +338,17 @@ if [ $BUILD_OCCA == 1 ]; then
   cd occa
 
   # configure OCCA
-  HIP_ROOT=${APP_HIP_ROOT}               \
-  CUDATookit_ROOT=${APP_CUDATookit_ROOT} \
-  OpenCL_ROOT=${APP_OpenCL_ROOT}         \
-  SYCL_ROOT=${APP_SYCL_ROOT}             \
-  INSTALL_DIR=${INSTALL_OCCA_DIRECTORY}  \
-  OCCA_ENABLE_HIP=${HIP}                 \
-  OCCA_ENABLE_CUDA=${CUDA}               \
-  OCCA_ENABLE_OPENCL=${OPENCL}           \
-  OCCA_ENABLE_OPENMP=${OPENMP}           \
-  OCCA_ENABLE_DPCPP=${DPCPP}             \
-  OCCA_ENABLE_METAL=${METAL}             \
+  HIP_ROOT=${APP_HIP_ROOT}                 \
+  CUDAToolkit_ROOT=${APP_CUDAToolkit_ROOT} \
+  OpenCL_ROOT=${APP_OpenCL_ROOT}           \
+  SYCL_ROOT=${APP_SYCL_ROOT}               \
+  INSTALL_DIR=${INSTALL_OCCA_DIRECTORY}    \
+  OCCA_ENABLE_HIP=${HIP}                   \
+  OCCA_ENABLE_CUDA=${CUDA}                 \
+  OCCA_ENABLE_OPENCL=${OPENCL}             \
+  OCCA_ENABLE_OPENMP=${OPENMP}             \
+  OCCA_ENABLE_DPCPP=${DPCPP}               \
+  OCCA_ENABLE_METAL=${METAL}               \
   ./configure-cmake.sh
 
   # build OCCA
@@ -415,7 +413,6 @@ if [ $BUILD_APP == 1 ]; then
     COMPILE_FAIL=1
   fi
 fi
-
 
 if [ ${COMPILE_FAIL} == 0 ]; then
   echo " "
